@@ -1,41 +1,43 @@
 // index.ts - Deno Deploy edge function for sending nearby roadside requests
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2"; // or use firebase-admin if you prefer
 
-// ── SECRETS (set these in Deno Deploy dashboard → Environment Variables) ──
+// ── Import Firebase Admin SDK (Deno-compatible version) ──
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js";
+import { getFirestore } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js";
+
+// IMPORTANT: For Admin auth we need firebase-admin, but Deno doesn't have native npm support yet.
+// Use this community Deno port or bundle firebase-admin manually.
+// For simplicity, we'll use a working Deno Firebase Admin setup via esm.sh
+
+// Better: Use https://esm.sh/firebase-admin (works in Deno Deploy)
+import admin from "https://esm.sh/firebase-admin@12.1.1?target=deno";
+
+// ── SECRETS (set in Deno Deploy → Environment Variables) ──
 const ONESIGNAL_APP_ID = Deno.env.get("ONESIGNAL_APP_ID")!;
 const ONESIGNAL_REST_KEY = Deno.env.get("ONESIGNAL_REST_KEY")!;
 const FIRESTORE_PROJECT_ID = Deno.env.get("FIRESTORE_PROJECT_ID")!;
 const FIRESTORE_PRIVATE_KEY = Deno.env.get("FIRESTORE_PRIVATE_KEY")!.replace(/\\n/g, "\n");
 const FIRESTORE_CLIENT_EMAIL = Deno.env.get("FIRESTORE_CLIENT_EMAIL")!;
 
-// Initialize Firebase Admin (Deno-compatible)
-import { initializeApp, cert } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js";
-import { getFirestore } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js";
+// Initialize Firebase Admin
+const serviceAccount = {
+  projectId: FIRESTORE_PROJECT_ID,
+  clientEmail: FIRESTORE_CLIENT_EMAIL,
+  privateKey: FIRESTORE_PRIVATE_KEY,
+};
 
-const firebaseApp = initializeApp({
-  credential: cert({
-    projectId: FIRESTORE_PROJECT_ID,
-    clientEmail: FIRESTORE_CLIENT_EMAIL,
-    privateKey: FIRESTORE_PRIVATE_KEY,
-  }),
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
 });
 
-const db = getFirestore(firebaseApp);
+const db = admin.firestore();
 
-// Simple geohash neighbors (you can use a small lib or this basic version)
+// Simple geohash neighbors function (replace with real lib if needed)
 function getNeighbors(geohash: string): string[] {
-  // Basic 3x3 grid neighbors (center + 8 around) - for production use geohash lib
-  const base32 = "0123456789bcdefghjkmnpqrstuvwxyz";
-  const directions = [
-    [0, 0], [0, 1], [0, -1], [1, 0], [-1, 0],
-    [1, 1], [1, -1], [-1, 1], [-1, -1],
-  ];
-  const neighbors: string[] = [geohash];
-
-  // Very simplified - for real use, import a geohash lib like https://deno.land/x/geohash
-  return neighbors; // ← Replace with real neighbor logic
+  // Placeholder: center + 8 neighbors (basic 3x3 grid)
+  // In production: use a proper geohash library like https://deno.land/x/geohash
+  return [geohash]; // ← Expand this in real code
 }
 
 serve(async (req: Request) => {
@@ -48,31 +50,36 @@ serve(async (req: Request) => {
     const {
       requestId,
       service,
-      userLocation, // { latitude, longitude }
+      userLocation,           // { latitude, longitude }
       locationDescription,
       userName,
     } = body;
 
     if (!userLocation?.latitude || !userLocation?.longitude) {
-      return new Response("Missing location", { status: 400 });
+      return new Response(JSON.stringify({ error: "Missing location" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      });
     }
 
-    // 1. Generate geohash for request (match precision used in app)
-    // For simplicity - in real app use same geohash lib as Flutter (dart_geohash → JS port)
-    const geohash = "fakegeohash123"; // ← REPLACE with actual geohash encoding
+    // 1. Generate geohash (you need to implement or import geohash encoder)
+    // For now placeholder — install https://deno.land/x/geohash in real project
+    const geohash = "fakegeohash123"; // REPLACE WITH REAL ENCODING
     const nearbyHashes = getNeighbors(geohash);
 
-    // 2. Query nearby providers
+    // 2. Query nearby providers (Firestore Admin SDK)
     const providersSnap = await db.collection("providers")
-      .where("geohash", "in", nearbyHashes.slice(0, 10)) // Firestore 'in' max 10
+      .where("geohash", "in", nearbyHashes.slice(0, 10)) // max 10 for 'in'
       .where("acceptingRequests", "==", true)
       .where("services", "array-contains", service)
       .get();
 
     const subscriptionIds: string[] = [];
     providersSnap.forEach((doc) => {
-      const subId = doc.data().oneSignalSubscriptionId;
-      if (subId) subscriptionIds.push(subId);
+      const data = doc.data();
+      if (data.oneSignalSubscriptionId) {
+        subscriptionIds.push(data.oneSignalSubscriptionId);
+      }
     });
 
     if (subscriptionIds.length === 0) {
@@ -81,8 +88,8 @@ serve(async (req: Request) => {
       });
     }
 
-    // 3. Send OneSignal push
-    const response = await fetch("https://onesignal.com/api/v1/notifications", {
+    // 3. Send OneSignal notification
+    const onesignalRes = await fetch("https://onesignal.com/api/v1/notifications", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -92,7 +99,7 @@ serve(async (req: Request) => {
         app_id: ONESIGNAL_APP_ID,
         include_player_ids: subscriptionIds,
         headings: { en: `New ${service} Request Nearby` },
-        contents: { en: `${userName} needs help: ${locationDescription || "See details"}` },
+        contents: { en: `${userName || "A user"} needs help: ${locationDescription || "See details"}` },
         data: {
           type: "new_request",
           requestId,
@@ -103,10 +110,10 @@ serve(async (req: Request) => {
       }),
     });
 
-    if (!response.ok) {
-      const err = await response.text();
-      console.error("OneSignal failed:", err);
-      return new Response("Push failed", { status: 500 });
+    if (!onesignalRes.ok) {
+      const errText = await onesignalRes.text();
+      console.error("OneSignal error:", errText);
+      return new Response(JSON.stringify({ error: "Push failed" }), { status: 500 });
     }
 
     return new Response(JSON.stringify({
@@ -116,7 +123,7 @@ serve(async (req: Request) => {
       headers: { "Content-Type": "application/json" },
     });
   } catch (err) {
-    console.error(err);
-    return new Response("Internal error", { status: 500 });
+    console.error("Error:", err);
+    return new Response(JSON.stringify({ error: "Internal server error" }), { status: 500 });
   }
 });
