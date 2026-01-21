@@ -220,26 +220,11 @@ async function queryProviders(geohashes: string[], service: string): Promise<any
   const url = `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents:runQuery`;
 
   const body = {
-    structuredQuery: {
-      from: [{ collectionId: "providers" }],
-      where: {
-        compositeFilter: {
-          op: "AND",
-          filters: [
-           
-            {
-              fieldFilter: {
-                field: { fieldPath: "servicesOffered" },
-                op: "ARRAY_CONTAINS",
-                value: { stringValue: service },
-              },
-            },
-            // acceptingRequests filter removed as requested
-          ],
-        },
-      },
-      limit: 50,
-    },
+   structuredQuery: {
+  from: [{ collectionId: "providers" }],
+  limit: 5,
+}
+
   };
 
   log("INFO", "Querying providers", { 
