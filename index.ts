@@ -299,6 +299,10 @@ export default {
     try {
       const payload = await req.json();
       log("INFO", "Incoming request", payload);
+	  log("INFO", "Using Firestore project", {
+  FIRESTORE_PROJECT_ID
+});
+
 
       const {
         requestId,
