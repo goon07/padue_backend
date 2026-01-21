@@ -251,7 +251,7 @@ log("INFO", "Firestore runQuery URL", { url });
 
 const text = await res.text();
 log("INFO", "Firestore raw response", text);
-const json = JSON.parse(text);
+
 
 
   if (!res.ok) {
