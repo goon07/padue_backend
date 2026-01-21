@@ -219,16 +219,10 @@ async function queryProviders(geohashes: string[], service: string): Promise<any
                 value: { arrayValue: { values: geohashes.map(h => ({ stringValue: h })) } },
               },
             },
+
             {
               fieldFilter: {
-                field: { fieldPath: "acceptingRequests" },
-                op: "EQUAL",
-                value: { booleanValue: true },
-              },
-            },
-            {
-              fieldFilter: {
-                field: { fieldPath: "services" },
+                field: { fieldPath: "servicesOffered" },
                 op: "ARRAY_CONTAINS",
                 value: { stringValue: service },
               },
