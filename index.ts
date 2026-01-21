@@ -1,6 +1,6 @@
 // index.ts — Deno Deploy Edge Function
 // Notifies nearby providers using Firestore REST API + OneSignal
-// Fixed version with service account authentication (2025/2026)
+// Updated: force-include center geohash + removed acceptingRequests filter
 
 /* =======================
    ENVIRONMENT VARIABLES
@@ -32,7 +32,7 @@ let cachedToken: TokenCache | null = null;
 async function getAccessToken(): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
 
-  if (cachedToken && cachedToken.expiresAt > now + 300) { // refresh 5 min early
+  if (cachedToken && cachedToken.expiresAt > now + 300) {
     return cachedToken.token;
   }
 
@@ -54,7 +54,6 @@ async function getAccessToken(): Promise<string> {
   const encodedPayload = base64url(JSON.stringify(payload));
   const input = `${encodedHeader}.${encodedPayload}`;
 
-  // Prepare private key (PKCS#8 PEM → binary)
   const pem = credentials.private_key
     .replace("-----BEGIN PRIVATE KEY-----", "")
     .replace("-----END PRIVATE KEY-----", "")
@@ -80,7 +79,6 @@ async function getAccessToken(): Promise<string> {
 
   const assertion = `${input}.${encodedSig}`;
 
-  // Exchange JWT for access token
   const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -108,7 +106,7 @@ async function getAccessToken(): Promise<string> {
 }
 
 /* =======================
-   GEOHASH (accurate enough for roadside ~10-30 km)
+   GEOHASH
 ======================= */
 const BASE32 = "0123456789bcdefghjkmnpqrstuvwxyz";
 
@@ -150,44 +148,60 @@ function encodeGeohash(lat: number, lon: number, precision = 7): string {
   return hash;
 }
 
-// Returns center hash + 8 neighbors (9 total)
+// Improved neighbor function + force include center
 function getGeohashNeighbors(center: string): string[] {
-  // For precision 7, cell size ~150m x ~150m
-  // Offsets in degrees are approximate but good enough for ~20-30 km coverage
-  const approxCellDeg = 0.004; // ~450m at equator – safe buffer
+  if (!center || center.length < 5) return [center];
 
-  const { lat: centerLat, lon: centerLon } = approximateDecode(center);
+  const neighbors = new Set([center]); // force include center
+
+  // Approximate neighbors with slightly larger step for better coverage
+  const step = 0.005; // ~550m at equator, adjusted for latitude ~15°
+  
+  const { lat: centerLat, lon: centerLon } = approximateCenter(center);
 
   const offsets = [
-    [ 0,  0], // self
-    [ 0,  1], [ 1,  1], [ 1,  0], [ 1, -1],
-    [ 0, -1], [-1, -1], [-1,  0], [-1,  1],
+    [ 0,  0], // already included
+    [ 0,  step], [ step,  step], [ step,  0], [ step, -step],
+    [ 0, -step], [-step, -step], [-step,  0], [-step,  step],
+    // Extra ring for safety (optional - comment out if too many)
+    // [0, step*2], [step*2, 0], etc.
   ];
 
-  return offsets.map(([dLat, dLon]) =>
-    encodeGeohash(centerLat + dLat * approxCellDeg, centerLon + dLon * approxCellDeg, center.length)
-  );
+  for (const [dLat, dLon] of offsets) {
+    const nLat = centerLat + dLat;
+    const nLon = centerLon + dLon;
+    const hash = encodeGeohash(nLat, nLon, center.length);
+    if (hash) neighbors.add(hash);
+  }
+
+  const list = Array.from(neighbors);
+  log("INFO", "Generated geohash neighbors", { 
+    center, 
+    count: list.length, 
+    hashes: list 
+  });
+
+  return list;
 }
 
-// Rough decode – just for neighbor offset calculation
-function approximateDecode(hash: string): { lat: number; lon: number } {
-  let lat = 0, lon = 0;
+// Better approximate center (average of bounds)
+function approximateCenter(hash: string): { lat: number; lon: number } {
   let latMin = -90, latMax = 90;
   let lonMin = -180, lonMax = 180;
-  let even = true;
+  let isLon = true;
 
-  for (const char of hash) {
-    const idx = BASE32.indexOf(char);
+  for (const c of hash) {
+    const val = BASE32.indexOf(c);
     for (let i = 4; i >= 0; i--) {
-      const bit = (idx >> i) & 1;
-      if (even) {
+      const bit = (val >> i) & 1;
+      if (isLon) {
         const mid = (lonMin + lonMax) / 2;
         if (bit) lonMin = mid; else lonMax = mid;
       } else {
         const mid = (latMin + latMax) / 2;
         if (bit) latMin = mid; else latMax = mid;
       }
-      even = !even;
+      isLon = !isLon;
     }
   }
 
@@ -219,7 +233,6 @@ async function queryProviders(geohashes: string[], service: string): Promise<any
                 value: { arrayValue: { values: geohashes.map(h => ({ stringValue: h })) } },
               },
             },
-
             {
               fieldFilter: {
                 field: { fieldPath: "servicesOffered" },
@@ -227,14 +240,19 @@ async function queryProviders(geohashes: string[], service: string): Promise<any
                 value: { stringValue: service },
               },
             },
+            // acceptingRequests filter removed as requested
           ],
         },
       },
-      limit: 50, // safety limit – adjust as needed
+      limit: 50,
     },
   };
 
-  log("INFO", "Querying providers", { geohashesCount: geohashes.length, service });
+  log("INFO", "Querying providers", { 
+    geohashesCount: geohashes.length, 
+    service,
+    geohashesSample: geohashes.slice(0, 5) // first 5 for brevity
+  });
 
   const res = await fetch(url, {
     method: "POST",
@@ -316,7 +334,6 @@ export default {
         return Response.json({ error: "Missing required fields" }, { status: 400 });
       }
 
-      // Prefer client-provided geohash (more precise)
       const centerHash = clientGeohash || encodeGeohash(
         userLocation.latitude,
         userLocation.longitude,
@@ -328,13 +345,16 @@ export default {
       const providers = await queryProviders(geohashes, service);
 
       const playerIds = providers
-        .map((p: any) => p.oneSignalSubscriptionId?.stringValue)
+        .map((p: any) => p.oneSignalPlayerId?.stringValue || p.oneSignalSubscriptionId?.stringValue)
         .filter((id?: string) => id?.trim());
 
       const uniqueIds = [...new Set(playerIds as string[])];
 
       if (uniqueIds.length === 0) {
-        log("WARN", "No matching providers found");
+        log("WARN", "No matching providers found", { 
+          centerHash,
+          geohashesCount: geohashes.length 
+        });
         return Response.json({ status: "no_providers", notified: 0 });
       }
 
