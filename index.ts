@@ -9,6 +9,12 @@ const FIRESTORE_PROJECT_ID = Deno.env.get("FIRESTORE_PROJECT_ID")!;
 const ONESIGNAL_APP_ID     = Deno.env.get("ONESIGNAL_APP_ID")!;
 const ONESIGNAL_REST_KEY   = Deno.env.get("ONESIGNAL_REST_KEY")!;
 const GOOGLE_SERVICE_ACCOUNT_JSON = Deno.env.get("GOOGLE_SERVICE_ACCOUNT_JSON")!;
+console.log("BOOT CHECK", {
+  FIRESTORE_PROJECT_ID: !!Deno.env.get("FIRESTORE_PROJECT_ID"),
+  ONESIGNAL_APP_ID: !!Deno.env.get("ONESIGNAL_APP_ID"),
+  GOOGLE_SERVICE_ACCOUNT_JSON: !!Deno.env.get("GOOGLE_SERVICE_ACCOUNT_JSON"),
+});
+
 
 /* =======================
    LOGGER
@@ -242,6 +248,11 @@ log("INFO", "Firestore runQuery URL", { url });
     },
     body: JSON.stringify(body),
   });
+
+const text = await res.text();
+log("INFO", "Firestore raw response", text);
+const json = JSON.parse(text);
+
 
   if (!res.ok) {
     const err = await res.text();
