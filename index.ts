@@ -220,24 +220,59 @@ function approximateCenter(hash: string): { lat: number; lon: number } {
 /* =======================
    FIRESTORE QUERY
 ======================= */
+
 async function queryProviders(geohashes: string[], service: string): Promise<any[]> {
   const accessToken = await getAccessToken();
 
+  // Firestore IN filter limit protection
+  const safeGeohashes = geohashes.slice(0, 10);
+
   const url = `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents:runQuery`;
-log("INFO", "Firestore runQuery URL", { url });
+
+  log("INFO", "Firestore runQuery URL", { url });
 
   const body = {
-   structuredQuery: {
-  from: [{ collectionId: "providers" }],
-  limit: 5,
-}
-
+    structuredQuery: {
+      from: [{ collectionId: "providers" }],
+      where: {
+        compositeFilter: {
+          op: "AND",
+          filters: [
+            {
+              fieldFilter: {
+                field: { fieldPath: "availability" },
+                op: "EQUAL",
+                value: { booleanValue: true }
+              }
+            },
+            {
+              fieldFilter: {
+                field: { fieldPath: "servicesOffered" },
+                op: "ARRAY_CONTAINS",
+                value: { stringValue: service }
+              }
+            },
+            {
+              fieldFilter: {
+                field: { fieldPath: "geohash" },
+                op: "IN",
+                value: {
+                  arrayValue: {
+                    values: safeGeohashes.map(h => ({ stringValue: h }))
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      limit: 20
+    }
   };
 
-  log("INFO", "Querying providers", { 
-    geohashesCount: geohashes.length, 
+  log("INFO", "Querying providers with filters", {
     service,
-    geohashesSample: geohashes.slice(0, 5) // first 5 for brevity
+    geohashes: safeGeohashes
   });
 
   const res = await fetch(url, {
@@ -249,31 +284,36 @@ log("INFO", "Firestore runQuery URL", { url });
     body: JSON.stringify(body),
   });
 
-const text = await res.text();
-log("INFO", "Firestore raw response", text);
-
-
+  const text = await res.text();
 
   if (!res.ok) {
-    const err = await res.text();
-    log("ERROR", "Firestore query failed", { status: res.status, body: err });
+    log("ERROR", "Firestore query failed", {
+      status: res.status,
+      body: text
+    });
     return [];
   }
 
-  const json = await res.json();
+  log("INFO", "Firestore raw response", text);
+
+  const json = JSON.parse(text);
+
   const docs = json
     .filter((r: any) => r.document)
     .map((r: any) => r.document.fields);
 
-  log("INFO", "Providers found", { count: docs.length });
+  log("INFO", "Providers found after filtering", {
+    count: docs.length
+  });
+
   return docs;
 }
 
 /* =======================
    ONESIGNAL PUSH
 ======================= */
-async function sendPush(playerIds: string[], title: string, body: string, data: object) {
-  if (playerIds.length === 0) return;
+async function sendPush(subscriptionIds: string[], title: string, body: string, data: object) {
+  if (subscriptionIds.length === 0) return;
 
   const res = await fetch("https://onesignal.com/api/v1/notifications", {
     method: "POST",
@@ -283,21 +323,20 @@ async function sendPush(playerIds: string[], title: string, body: string, data: 
     },
     body: JSON.stringify({
       app_id: ONESIGNAL_APP_ID,
-      include_player_ids: playerIds,
+      include_subscription_ids: subscriptionIds,
       headings: { en: title },
       contents: { en: body },
       data,
-      ios_badgeType: "SetTo",
-      ios_badgeCount: 1,
     }),
   });
 
   if (!res.ok) {
     log("ERROR", "OneSignal push failed", await res.text());
   } else {
-    log("INFO", "Push sent successfully", { count: playerIds.length });
+    log("INFO", "Push sent successfully", { count: subscriptionIds.length });
   }
 }
+
 
 /* =======================
    MAIN HANDLER
@@ -337,11 +376,17 @@ export default {
 
       const providers = await queryProviders(geohashes, service);
 
-      const playerIds = providers
-        .map((p: any) => p.oneSignalPlayerId?.stringValue || p.oneSignalSubscriptionId?.stringValue)
-        .filter((id?: string) => id?.trim());
+    const subscriptionIds = providers
+  .map((p: any) => p.oneSignalSubscriptionId?.stringValue)
+  .filter((id?: string) => typeof id === "string" && id.length > 10);
 
-      const uniqueIds = [...new Set(playerIds as string[])];
+const uniqueIds = [...new Set(subscriptionIds)];
+
+log("INFO", "Collected OneSignal subscription IDs", {
+  providers: providers.length,
+  subscriptions: uniqueIds.length
+});
+
 
       if (uniqueIds.length === 0) {
         log("WARN", "No matching providers found", { 
