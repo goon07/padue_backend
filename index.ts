@@ -226,13 +226,7 @@ async function queryProviders(geohashes: string[], service: string): Promise<any
         compositeFilter: {
           op: "AND",
           filters: [
-            {
-              fieldFilter: {
-                field: { fieldPath: "geohash" },
-                op: "IN",
-                value: { arrayValue: { values: geohashes.map(h => ({ stringValue: h })) } },
-              },
-            },
+           
             {
               fieldFilter: {
                 field: { fieldPath: "servicesOffered" },
