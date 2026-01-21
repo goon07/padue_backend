@@ -218,6 +218,7 @@ async function queryProviders(geohashes: string[], service: string): Promise<any
   const accessToken = await getAccessToken();
 
   const url = `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents:runQuery`;
+log("INFO", "Firestore runQuery URL", { url });
 
   const body = {
    structuredQuery: {
@@ -299,9 +300,7 @@ export default {
     try {
       const payload = await req.json();
       log("INFO", "Incoming request", payload);
-	  log("INFO", "Using Firestore project", {
-  FIRESTORE_PROJECT_ID
-});
+	  log("INFO", "Using Firestore project", {FIRESTORE_PROJECT_ID});
 
 
       const {
