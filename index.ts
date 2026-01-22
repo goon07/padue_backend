@@ -9,6 +9,8 @@ const FIRESTORE_PROJECT_ID = Deno.env.get("FIRESTORE_PROJECT_ID")!;
 const ONESIGNAL_APP_ID     = Deno.env.get("ONESIGNAL_APP_ID")!;
 const ONESIGNAL_REST_KEY   = Deno.env.get("ONESIGNAL_REST_KEY")!;
 const GOOGLE_SERVICE_ACCOUNT_JSON = Deno.env.get("GOOGLE_SERVICE_ACCOUNT_JSON")!;
+const MATCH_PRECISION = 6;
+
 console.log("BOOT CHECK", {
   FIRESTORE_PROJECT_ID: !!Deno.env.get("FIRESTORE_PROJECT_ID"),
   ONESIGNAL_APP_ID: !!Deno.env.get("ONESIGNAL_APP_ID"),
@@ -154,82 +156,16 @@ function encodeGeohash(lat: number, lon: number, precision = 7): string {
   return hash;
 }
 
-// Improved neighbor function + force include center
-function getGeohashNeighbors(center: string): string[] {
-  if (!center || center.length < 5) return [center];
-
-  const neighbors = new Set([center]); // force include center
-
-  // Approximate neighbors with slightly larger step for better coverage
-  const step = 0.005; // ~550m at equator, adjusted for latitude ~15°
-  
-  const { lat: centerLat, lon: centerLon } = approximateCenter(center);
-
-  const offsets = [
-    [ 0,  0], // already included
-    [ 0,  step], [ step,  step], [ step,  0], [ step, -step],
-    [ 0, -step], [-step, -step], [-step,  0], [-step,  step],
-    // Extra ring for safety (optional - comment out if too many)
-    // [0, step*2], [step*2, 0], etc.
-  ];
-
-  for (const [dLat, dLon] of offsets) {
-    const nLat = centerLat + dLat;
-    const nLon = centerLon + dLon;
-    const hash = encodeGeohash(nLat, nLon, center.length);
-    if (hash) neighbors.add(hash);
-  }
-
-  const list = Array.from(neighbors);
-  log("INFO", "Generated geohash neighbors", { 
-    center, 
-    count: list.length, 
-    hashes: list 
-  });
-
-  return list;
-}
-
-// Better approximate center (average of bounds)
-function approximateCenter(hash: string): { lat: number; lon: number } {
-  let latMin = -90, latMax = 90;
-  let lonMin = -180, lonMax = 180;
-  let isLon = true;
-
-  for (const c of hash) {
-    const val = BASE32.indexOf(c);
-    for (let i = 4; i >= 0; i--) {
-      const bit = (val >> i) & 1;
-      if (isLon) {
-        const mid = (lonMin + lonMax) / 2;
-        if (bit) lonMin = mid; else lonMax = mid;
-      } else {
-        const mid = (latMin + latMax) / 2;
-        if (bit) latMin = mid; else latMax = mid;
-      }
-      isLon = !isLon;
-    }
-  }
-
-  return {
-    lat: (latMin + latMax) / 2,
-    lon: (lonMin + lonMax) / 2,
-  };
-}
-
 /* =======================
    FIRESTORE QUERY
 ======================= */
-
-async function queryProviders(geohashes: string[], service: string): Promise<any[]> {
+async function queryProvidersByPrefix(
+  geohashPrefix: string,
+  service: string
+): Promise<any[]> {
   const accessToken = await getAccessToken();
 
-  // Firestore IN filter limit protection
-  const safeGeohashes = geohashes.slice(0, 10);
-
   const url = `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents:runQuery`;
-
-  log("INFO", "Firestore runQuery URL", { url });
 
   const body = {
     structuredQuery: {
@@ -255,46 +191,46 @@ async function queryProviders(geohashes: string[], service: string): Promise<any
             {
               fieldFilter: {
                 field: { fieldPath: "geohash" },
-                op: "IN",
-                value: {
-                  arrayValue: {
-                    values: safeGeohashes.map(h => ({ stringValue: h }))
-                  }
-                }
+                op: "GREATER_THAN_OR_EQUAL",
+                value: { stringValue: geohashPrefix }
               }
             }
           ]
         }
       },
-      limit: 20
+      orderBy: [
+        {
+          field: { fieldPath: "geohash" },
+          direction: "ASCENDING"
+        }
+      ],
+      endAt: {
+        values: [{ stringValue: geohashPrefix + "\uf8ff" }]
+      },
+      limit: 30
     }
   };
 
-  log("INFO", "Querying providers with filters", {
-    service,
-    geohashes: safeGeohashes
+  log("INFO", "Querying providers by geohash prefix", {
+    prefix: geohashPrefix,
+    service
   });
 
   const res = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Authorization": `Bearer ${accessToken}`,
+      Authorization: `Bearer ${accessToken}`
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify(body)
   });
 
   const text = await res.text();
 
   if (!res.ok) {
-    log("ERROR", "Firestore query failed", {
-      status: res.status,
-      body: text
-    });
+    log("ERROR", "Firestore query failed", { status: res.status, body: text });
     return [];
   }
-
-  log("INFO", "Firestore raw response", text);
 
   const json = JSON.parse(text);
 
@@ -302,9 +238,7 @@ async function queryProviders(geohashes: string[], service: string): Promise<any
     .filter((r: any) => r.document)
     .map((r: any) => r.document.fields);
 
-  log("INFO", "Providers found after filtering", {
-    count: docs.length
-  });
+  log("INFO", "Providers found", { count: docs.length });
 
   return docs;
 }
@@ -366,15 +300,15 @@ export default {
         return Response.json({ error: "Missing required fields" }, { status: 400 });
       }
 
-      const centerHash = clientGeohash || encodeGeohash(
-        userLocation.latitude,
-        userLocation.longitude,
-        7
-      );
+const rawHash =
+  clientGeohash ??
+  encodeGeohash(userLocation.latitude, userLocation.longitude, 7);
 
-      const geohashes = getGeohashNeighbors(centerHash);
+const centerPrefix = rawHash.slice(0, MATCH_PRECISION);
 
-      const providers = await queryProviders(geohashes, service);
+
+     const providers = await queryProvidersByPrefix(centerPrefix, service);
+
 
     const subscriptionIds = providers
   .map((p: any) => p.oneSignalSubscriptionId?.stringValue)
@@ -389,10 +323,11 @@ log("INFO", "Collected OneSignal subscription IDs", {
 
 
       if (uniqueIds.length === 0) {
-        log("WARN", "No matching providers found", { 
-          centerHash,
-          geohashesCount: geohashes.length 
-        });
+log("INFO", "Using geohash prefix", {
+  rawHash,
+  prefix: centerPrefix
+});
+
         return Response.json({ status: "no_providers", notified: 0 });
       }
 
